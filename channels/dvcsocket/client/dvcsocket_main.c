@@ -71,7 +71,6 @@ struct _DVCSOCKET_CHANNEL_CALLBACK
     wQueue *input_stream_list;		/* Queue to store received data */
     wQueue *output_stream_list;		/* Queue to store data to send back */
     HANDLE socket_mutex;			/* mutex to synchronize socket access */
-    int thread_count;				/* counter decremented each time a thread has terminated */
     HANDLE stopAllThreadsEvent;		/* Event to terminate thread */
     HANDLE writeThreadEvent;		/* Event signaling writeThread terminaison */
     HANDLE sockreadThreadEvent;		/* Event signaling sockreadThread terminaison */
@@ -198,40 +197,18 @@ static int dvcsocket_on_close(IWTSVirtualChannelCallback* pChannelCallback)
 	waitObj[2] = callback->sockwriteThreadEvent;
 
 	SetEvent(callback->stopAllThreadsEvent);
-	while(1){
-		if(callback->thread_count == 0){
-			DEBUG_DVC("dvcsocket_on_close: All good %lu", sizeof(*callback));
+	/* WinPR supports waiting for all events to occur */
+    dwWaitEvent = WaitForMultipleObjects(3, waitObj, TRUE, INFINITE);
+	switch(dwWaitEvent){
+		case WAIT_OBJECT_0:{
+			DEBUG_DVC("dvcsocket_on_close: Reset all 3 events");
+			ResetEvent(callback->writeThreadEvent);
+			ResetEvent(callback->sockreadThreadEvent);
+			ResetEvent(callback->sockwriteThreadEvent);
 			break;
 		}
-		/* WinPR does not "yet" support waiting for all events to occur, we need to use a counter */
-        dwWaitEvent = WaitForMultipleObjects(3, waitObj, FALSE, INFINITE);
-		switch(dwWaitEvent){
-			case WAIT_OBJECT_0:{
-				DEBUG_DVC("dvcsocket_on_close: Event writeThreadEvent");
-				callback->thread_count = callback->thread_count - 1;
-				ResetEvent(callback->writeThreadEvent);
-				if(callback->thread_count == 0){
-					break;
-				}
-			}
-			case WAIT_OBJECT_0 +1:{
-				DEBUG_DVC("dvcsocket_on_close: Event sockreadThreadEvent");
-				ResetEvent(callback->sockreadThreadEvent);
-				callback->thread_count = callback->thread_count - 1;
-				if(callback->thread_count == 0){
-					break;
-				}
-
-			}
-			case WAIT_OBJECT_0 +2:{
-				DEBUG_DVC("dvcsocket_on_close: Event sockwriteThreadEvent");
-				ResetEvent(callback->sockwriteThreadEvent);
-				callback->thread_count = callback->thread_count - 1;
-				DEBUG_DVC("dvcsocket_on_close: waiting for %d count to be 0", callback->thread_count);
-				if(callback->thread_count == 0){
-					break;
-				}
-			}
+		default:{
+            fprintf(stderr, "dvcsocket_on_close: Error %x WaitForMultipleObjects\n", dwWaitEvent);
 		}
 	}
 
@@ -307,7 +284,7 @@ static void dvcsocket_process_send_data_back(DVCSOCKET_CHANNEL_CALLBACK* callbac
                 ExitThread(0);
             }
             default:
-                fprintf(stderr, "dvcsocket_process_send_data_back: Error WaitForMultipleObjects\n");
+                fprintf(stderr, "dvcsocket_process_send_data_back: Error %x WaitForMultipleObjects\n", dwWaitEvent);
                 return;
         }
     }
@@ -329,7 +306,7 @@ static void dvcsocket_process_write_to_socket(DVCSOCKET_CHANNEL_CALLBACK* callba
     }
 	waitObj[0] = Queue_Event(callback->input_stream_list);
 	waitObj[1] = callback->stopAllThreadsEvent;
-    // Fetch data from Qeue and write it to socket
+    // Fetch data from Queue and write it to socket
     while (1)
     {
         dwWaitEvent = WaitForMultipleObjects(2, waitObj, FALSE, INFINITE);
@@ -516,7 +493,6 @@ static int dvcsocket_on_new_channel_connection(IWTSListenerCallback* pListenerCa
 	callback->channel = pChannel;
 
     callback->local_socket_fd = open_socket();
-    callback->thread_count = 3;
 
     callback->socket_mutex = CreateMutex(NULL, FALSE, NULL);
     callback->output_stream_list = Queue_New(TRUE, -1, -1);
